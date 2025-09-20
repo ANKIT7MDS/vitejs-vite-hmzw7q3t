@@ -39,7 +39,7 @@
 
     let idx = 0;
     for (const f of fileList) {
-      if (f.size > 10 * 1024 * 1024) { // 10MB limit
+      if (f.size > 10 * 1024 * 1024) { // 10MB limit (इच्छानुसार बदलें)
         uploads[idx].status = 'too-big';
         uploads = [...uploads];
         idx++;
