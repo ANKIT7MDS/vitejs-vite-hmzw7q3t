@@ -1,41 +1,67 @@
-// src/lib/uploader.js
-import { UPLOAD_URL } from './config';
+<script>
+  import { getAuth } from "firebase/auth";
+  import { uploadFile } from "../lib/uploader";
+  import { savePhotoMeta } from "../lib/photos";   // ⬅️ नया import
 
-/** File -> dataURL (base64) */
-function fileToDataURL(file) {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(r.result);
-    r.onerror = reject;
-    r.readAsDataURL(file);
-  });
-}
+  export let selectedCollectionId = "";
+  export let selectedEventId = "";
 
-/** एक फाइल अपलोड करें */
-export async function uploadFile({ file, uid, collectionId, eventId }) {
-  if (!file) throw new Error("No file");
-  if (!uid || !collectionId || !eventId) throw new Error("Missing uid/collectionId/eventId");
+  let queue = [];
+  let results = [];
+  let busy = false;
+  let doneCount = 0;
 
-  const dataUrl = await fileToDataURL(file);
-
-  const payload = {
-    uid,
-    collectionId,
-    eventId,
-    filename: file.name,
-    contentType: file.type || "application/octet-stream",
-    dataUrl
-  };
-
-  const res = await fetch(UPLOAD_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.ok) {
-    throw new Error(json?.error || `HTTP ${res.status}`);
+  function getUid() {
+    const u = getAuth().currentUser;
+    return u?.uid || u?.phoneNumber || "demo";
   }
-  return json; // { ok, path, downloadURL }
-}
+
+  // ... बाकी जैसा था ...
+
+  async function startUpload() {
+    if (!selectedCollectionId || !selectedEventId) {
+      alert("पहले Collection और Event चुनें");
+      return;
+    }
+    if (queue.length === 0) {
+      alert("फाइल चुनें या ड्रैग-ड्रॉप करें");
+      return;
+    }
+
+    busy = true;
+    doneCount = 0;
+    results = [];
+
+    const uid = getUid();
+
+    for (const file of queue) {
+      try {
+        const out = await uploadFile({
+          file,
+          uid,
+          collectionId: selectedCollectionId,
+          eventId: selectedEventId
+        });
+
+        // ⬇️ Firestore में फोटो मेटाडेटा सेव
+        await savePhotoMeta({
+          collectionId: selectedCollectionId,
+          eventId: selectedEventId,
+          name: file.name,
+          path: out.path,
+          downloadURL: out.downloadURL,
+          size: file.size,
+          type: file.type
+        });
+
+        results = [{ name: file.name, ok: true, ...out }, ...results];
+      } catch (err) {
+        results = [{ name: file.name, ok: false, error: String(err) }, ...results];
+      }
+      doneCount++;
+    }
+
+    queue = [];
+    busy = false;
+  }
+</script>
