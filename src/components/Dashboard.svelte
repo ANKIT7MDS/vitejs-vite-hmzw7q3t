@@ -1,184 +1,193 @@
 <script>
-  import { currentUser, logout } from '../lib/stores/auth';
-  import { get } from 'svelte/store';
-  import { db } from '../lib/firebase';
+  import { onMount } from 'svelte';
+  import { auth } from '../lib/firebase.js';
+  import { db } from '../lib/firebase.js';
   import {
-    doc, setDoc, addDoc, collection, serverTimestamp,
-    onSnapshot, query, orderBy
+    addDoc, collection, doc, onSnapshot, orderBy, query, serverTimestamp
   } from 'firebase/firestore';
   import Uploader from './Uploader.svelte';
 
-  let displayName = '';
-  let collectionName = '';
-  let eventName = '';
+  let user = null;
 
-  // चयन
+  // UI state
+  let displayName = '';
+  let newCollectionName = '';
+  let newEventName = '';
+
+  // IDs जो Uploader को भेजेंगे
   let selectedCollectionId = '';
   let selectedEventId = '';
 
-  // लिस्ट
-  let collections = [];
-  let events = [];
-  let photos = [];
+  // lists
+  let collections = []; // [{id, name, ...}]
+  let events = [];      // [{id, name, ...}]
 
-  // प्रोफाइल
-  async function ensureUserProfile() {
-    const user = get(currentUser);
-    if (!user) return;
-    const userDocRef = doc(db, 'photographers', user.uid);
-    await setDoc(userDocRef, {
-      phoneNumber: user.phoneNumber || null,
-      displayName: displayName || null,
-      createdAt: serverTimestamp(),
-      lastLoginAt: serverTimestamp()
-    }, { merge: true });
-    alert('Profile saved/updated!');
+  let unsubCollections = null;
+  let unsubEvents = null;
+
+  onMount(() => {
+    const off = auth.onAuthStateChanged(u => {
+      user = u;
+      if (user) {
+        startCollectionsWatcher(user.uid);
+      } else {
+        stopCollectionsWatcher();
+        stopEventsWatcher();
+      }
+    });
+    return () => {
+      off && off();
+      stopCollectionsWatcher();
+      stopEventsWatcher();
+    };
+  });
+
+  function startCollectionsWatcher(uid) {
+    stopCollectionsWatcher();
+    const ref = collection(db, `photographers/${uid}/collections`);
+    const q = query(ref, orderBy('createdAt', 'desc'));
+    unsubCollections = onSnapshot(q, snap => {
+      collections = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      // अगर selected collection गायब हो गया हो
+      if (!collections.find(c => c.id === selectedCollectionId)) {
+        selectedCollectionId = '';
+        selectedEventId = '';
+        events = [];
+      }
+    });
+  }
+  function stopCollectionsWatcher() {
+    unsubCollections && unsubCollections();
+    unsubCollections = null;
+    collections = [];
+  }
+
+  function startEventsWatcher(uid, colId) {
+    stopEventsWatcher();
+    const ref = collection(db, `photographers/${uid}/collections/${colId}/events`);
+    const q = query(ref, orderBy('createdAt', 'desc'));
+    unsubEvents = onSnapshot(q, snap => {
+      events = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      if (!events.find(e => e.id === selectedEventId)) {
+        selectedEventId = '';
+      }
+    });
+  }
+  function stopEventsWatcher() {
+    unsubEvents && unsubEvents();
+    unsubEvents = null;
+    events = [];
+  }
+
+  // selectedCollectionId बदले तो events watcher चलाएँ
+  $: if (user && selectedCollectionId) {
+    startEventsWatcher(user.uid, selectedCollectionId);
+  }
+  $: if (selectedCollectionId === '') {
+    stopEventsWatcher();
+    selectedEventId = '';
   }
 
   async function createCollection() {
-    const user = get(currentUser);
-    if (!user) return alert('Not logged in');
-    if (!collectionName.trim()) return alert('Enter collection name');
-
-    const colRef = collection(db, 'photographers', user.uid, 'collections');
-    const docRef = await addDoc(colRef, {
-      name: collectionName.trim(),
+    if (!user) return;
+    if (!newCollectionName.trim()) return;
+    await addDoc(collection(db, `photographers/${user.uid}/collections`), {
+      name: newCollectionName.trim(),
       createdAt: serverTimestamp()
     });
-    selectedCollectionId = docRef.id;
-    collectionName = '';
-    alert(`Collection created: ${docRef.id}`);
+    newCollectionName = '';
   }
 
   async function createEvent() {
-    const user = get(currentUser);
-    if (!user) return alert('Not logged in');
-    if (!selectedCollectionId) return alert('Select/Create a collection first');
-    if (!eventName.trim()) return alert('Enter event name');
-
-    const eventsRef = collection(db, 'photographers', user.uid, 'collections', selectedCollectionId, 'events');
-    const docRef = await addDoc(eventsRef, {
-      name: eventName.trim(),
-      createdAt: serverTimestamp()
-    });
-    selectedEventId = docRef.id;
-    eventName = '';
-    alert(`Event created: ${docRef.id}`);
+    if (!user || !selectedCollectionId) return;
+    if (!newEventName.trim()) return;
+    await addDoc(
+      collection(db, `photographers/${user.uid}/collections/${selectedCollectionId}/events`),
+      {
+        name: newEventName.trim(),
+        createdAt: serverTimestamp()
+      }
+    );
+    newEventName = '';
   }
 
-  // live collections
-  $: (() => {
-    const user = get(currentUser);
-    if (!user) return;
-    const colRef = collection(db, 'photographers', user.uid, 'collections');
-    const q = query(colRef, orderBy('createdAt', 'desc'));
-    return onSnapshot(q, snap => {
-      collections = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    });
-  })();
-
-  // live events for selected collection
-  $: (() => {
-    const user = get(currentUser);
-    if (!user || !selectedCollectionId) { events = []; return; }
-    const evRef = collection(db, 'photographers', user.uid, 'collections', selectedCollectionId, 'events');
-    const q = query(evRef, orderBy('createdAt', 'desc'));
-    return onSnapshot(q, snap => {
-      events = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    });
-  })();
-
-  // live photos for selected event
-  $: (() => {
-    const user = get(currentUser);
-    if (!user || !selectedCollectionId || !selectedEventId) { photos = []; return; }
-    const pRef = collection(db, 'photographers', user.uid, 'collections', selectedCollectionId, 'events', selectedEventId, 'photos');
-    const q = query(pRef, orderBy('createdAt', 'desc'));
-    return onSnapshot(q, snap => {
-      photos = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-    });
-  })();
+  function logout() { auth.signOut(); }
 </script>
 
-<div class="p-6 max-w-4xl mx-auto">
-  <div class="flex items-center justify-between mb-6">
-    <h1 class="text-3xl font-bold">Dashboard</h1>
-    <button class="px-3 py-2 bg-gray-200 rounded" on:click={logout}>Logout</button>
-  </div>
+<style>
+  .section { margin: 16px 0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  select, input { padding:6px 8px; }
+  button { padding:6px 10px; cursor:pointer; }
+</style>
 
-  <p class="mb-4 text-sm text-gray-700">
-    Logged in as: <strong>{$currentUser?.phoneNumber || $currentUser?.uid}</strong>
-  </p>
+{#if !user}
+  <h2>Please login</h2>
+{:else}
+  <h1>Dashboard</h1>
 
-  <!-- Profile -->
-  <div class="border rounded p-4 mb-6">
-    <h2 class="text-xl font-semibold mb-2">Profile</h2>
-    <div class="flex gap-2">
-      <input class="border p-2 rounded flex-1" placeholder="Display Name (optional)" bind:value={displayName} />
-      <button class="px-3 py-2 bg-blue-600 text-white rounded" on:click={ensureUserProfile}>Save/Update Profile</button>
-    </div>
+  <div class="section">
+    <button on:click={logout}>Logout</button>
+    <p>Logged in as: <strong>{user.phoneNumber || user.uid}</strong></p>
   </div>
 
   <!-- Create Collection -->
-  <div class="border rounded p-4 mb-6">
-    <h2 class="text-xl font-semibold mb-2">Create Collection</h2>
-    <div class="flex gap-2 mb-3">
-      <input class="border p-2 rounded flex-1" placeholder="Collection name (e.g., Sharma Wedding)" bind:value={collectionName} />
-      <button class="px-3 py-2 bg-green-600 text-white rounded" on:click={createCollection}>Create Collection</button>
+  <div class="section">
+    <h3>Create Collection</h3>
+    <div class="row">
+      <input
+        placeholder="Collection name (e.g., Sharma Wedding)"
+        bind:value={newCollectionName} />
+      <button on:click={createCollection}>Create Collection</button>
     </div>
+  </div>
 
-    <!-- Collections list -->
-    {#if collections.length}
-      <div class="mb-2">
-        <label class="block text-sm mb-1">Select Collection</label>
-        <select class="border p-2 rounded w-full" bind:value={selectedCollectionId}>
-          <option value="" disabled selected>Select…</option>
-          {#each collections as c}
-            <option value={c.id}>{c.name} ({c.id})</option>
-          {/each}
-        </select>
-      </div>
-    {/if}
+  <!-- Select Collection -->
+  <div class="section">
+    <div class="row">
+      <label>Select Collection</label>
+      <select bind:value={selectedCollectionId}>
+        <option value="">-- choose collection --</option>
+        {#each collections as c}
+          <!-- value = सिर्फ ID -->
+          <option value={c.id}>{c.name}</option>
+        {/each}
+      </select>
+    </div>
   </div>
 
   <!-- Create Event -->
-  <div class="border rounded p-4 mb-6">
-    <h2 class="text-xl font-semibold mb-2">Create Event</h2>
-    <div class="flex gap-2 mb-3">
-      <input class="border p-2 rounded flex-1" placeholder="Event name (e.g., Sangeet)" bind:value={eventName} />
-      <button class="px-3 py-2 bg-purple-600 text-white rounded" on:click={createEvent}>Create Event</button>
+  <div class="section">
+    <h3>Create Event</h3>
+    <div class="row">
+      <input
+        placeholder="Event name (e.g., Sangeet)"
+        bind:value={newEventName}
+        disabled={!selectedCollectionId} />
+      <button on:click={createEvent} disabled={!selectedCollectionId}>Create Event</button>
     </div>
-
-    <!-- Events list -->
-    {#if events.length}
-      <div class="mb-2">
-        <label class="block text-sm mb-1">Select Event</label>
-        <select class="border p-2 rounded w-full" bind:value={selectedEventId}>
-          <option value="" disabled selected>Select…</option>
-          {#each events as e}
-            <option value={e.id}>{e.name} ({e.id})</option>
-          {/each}
-        </select>
-      </div>
-    {/if}
   </div>
 
-  <!-- Uploader -->
-  {#if selectedCollectionId && selectedEventId}
-    <div class="border rounded p-4 mb-6">
-      <h2 class="text-xl font-semibold mb-3">Upload Photos</h2>
-      <Uploader uid={$currentUser.uid} collectionId={selectedCollectionId} eventId={selectedEventId} />
-    </div>
-
-    <!-- Thumbnails (downloadURL) -->
-    {#if photos.length}
-      <div class="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3">
-        {#each photos as p}
-          <a href={p.downloadURL} target="_blank" class="block border rounded overflow-hidden">
-            <img src={p.downloadURL} alt={p.name} class="w-full h-40 object-cover" />
-          </a>
+  <!-- Select Event -->
+  <div class="section">
+    <div class="row">
+      <label>Select Event</label>
+      <select bind:value={selectedEventId} disabled={!selectedCollectionId}>
+        <option value="">-- choose event --</option>
+        {#each events as e}
+          <!-- value = सिर्फ ID -->
+          <option value={e.id}>{e.name}</option>
         {/each}
-      </div>
-    {/if}
-  {/if}
-</div>
+      </select>
+    </div>
+  </div>
+
+  <!-- Uploader needs IDs -->
+  <div class="section">
+    <h3>Upload Photos</h3>
+    <Uploader
+      {selectedCollectionId}
+      {selectedEventId}
+    />
+  </div>
+{/if}
