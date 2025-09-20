@@ -1,108 +1,167 @@
 <script>
-  import { storage, db } from '../lib/firebase';
-  import { getDownloadURL, ref, uploadBytesResumable } from 'firebase/storage';
+  // ---- Firebase + Firestore ----
+  import { auth } from '../lib/firebase.js';
+  import { db } from '../lib/firebase.js';
   import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 
-  export let uid;              // photographer UID
-  export let collectionId;     // चुना हुआ कलेक्शन
-  export let eventId;          // चुना हुआ इवेंट
+  // ---- Cloud Run endpoint ----
+  import { FUNCTION_URL } from '../lib/config.js';
 
+  // Dashboard.svelte से props
+  export let selectedCollectionId = '';
+  export let selectedEventId = '';
+
+  let isDragging = false;
   let files = [];
-  let uploads = []; // [{name, progress, state}]
+  let uploads = []; // {name, progress, status}
 
-  function pickFiles(e) {
-    files = Array.from(e.target.files || []);
-    startUpload(files);
+  function fileToDataURL(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
   }
 
-  function onDrop(e) {
-    e.preventDefault();
-    const dropped = Array.from(e.dataTransfer.files || []);
-    files = dropped;
-    startUpload(files);
-  }
-
-  function onDragOver(e){ e.preventDefault(); }
-
-  async function startUpload(list) {
-    if (!uid || !collectionId || !eventId) {
-      alert('Please select a collection and event first.');
+  async function startUpload(fileList) {
+    if (!selectedCollectionId || !selectedEventId) {
+      alert('पहले Collection और Event चुनें');
       return;
     }
-    if (!list.length) return;
+    const uid = auth.currentUser?.uid;
+    if (!uid) { alert('Login required'); return; }
 
-    uploads = list.map(f => ({ name: f.name, progress: 0, state: 'queued' }));
+    uploads = [];
+    for (const f of fileList) {
+      uploads = [...uploads, { name: f.name, progress: 0, status: 'pending' }];
+    }
 
-    for (const file of list) {
-      const idx = uploads.findIndex(u => u.name === file.name);
+    let idx = 0;
+    for (const f of fileList) {
+      if (f.size > 10 * 1024 * 1024) { // 10MB limit
+        uploads[idx].status = 'too-big';
+        uploads = [...uploads];
+        idx++;
+        continue;
+      }
+
       try {
-        const path = `photographers/${uid}/collections/${collectionId}/events/${eventId}/${Date.now()}_${file.name}`;
-        const storageRef = ref(storage, path);
-        const task = uploadBytesResumable(storageRef, file);
+        uploads[idx].status = 'uploading';
+        uploads[idx].progress = 25; // cosmetic
+        uploads = [...uploads];
 
-        task.on('state_changed', (snap) => {
-          const pct = Math.round((snap.bytesTransferred / snap.totalBytes) * 100);
-          uploads[idx].progress = pct;
-          uploads[idx].state = snap.state; // running, paused, success (custom)
-          uploads = [...uploads];
+        const dataUrl = await fileToDataURL(f);
+
+        const resp = await fetch(FUNCTION_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid,
+            collectionId: selectedCollectionId,
+            eventId: selectedEventId,
+            filename: f.name,
+            contentType: f.type || 'image/jpeg',
+            dataUrl
+          })
         });
 
-        await task;
-        const url = await getDownloadURL(storageRef);
+        const json = await resp.json();
 
-        // Firestore में मेटाडेटा सेव
+        if (!resp.ok || !json.ok) {
+          console.error('Upload failed:', json);
+          uploads[idx].status = 'failed';
+          uploads[idx].progress = 0;
+          uploads = [...uploads];
+          idx++;
+          continue;
+        }
+
+        // Firestore में फोटो का डॉक सेव करें
         await addDoc(
-          collection(db, 'photographers', uid, 'collections', collectionId, 'events', eventId, 'photos'),
+          collection(db, `photographers/${uid}/collections/${selectedCollectionId}/events/${selectedEventId}/photos`),
           {
-            name: file.name,
-            storagePath: path,
-            downloadURL: url,
-            size: file.size,
-            contentType: file.type,
+            name: f.name,
+            downloadURL: json.downloadURL, // 24h signed URL
+            path: json.path,               // storage path
+            contentType: f.type,
+            size: f.size,
             createdAt: serverTimestamp()
           }
         );
 
-        uploads[idx].state = 'success';
+        uploads[idx].status = 'done';
+        uploads[idx].progress = 100;
         uploads = [...uploads];
-      } catch (err) {
-        console.error('Upload error:', err);
-        uploads[idx].state = 'error';
+      } catch (e) {
+        console.error(e);
+        uploads[idx].status = 'failed';
+        uploads[idx].progress = 0;
         uploads = [...uploads];
       }
+      idx++;
+    }
+
+    alert('Uploads done!');
+  }
+
+  // drag & drop helpers
+  function onDrop(e) {
+    e.preventDefault();
+    isDragging = false;
+    if (e.dataTransfer?.files?.length) {
+      files = Array.from(e.dataTransfer.files);
+      startUpload(files);
+    }
+  }
+  function onDragOver(e) { e.preventDefault(); isDragging = true; }
+  function onDragLeave(e) { e.preventDefault(); isDragging = false; }
+  function onPick(e) {
+    const picked = e.target.files;
+    if (picked?.length) {
+      files = Array.from(picked);
+      startUpload(files);
+      e.target.value = ''; // re-pick allowed
     }
   }
 </script>
 
-<div
-  class="border-2 border-dashed rounded p-6 text-center cursor-pointer"
-  on:drop={onDrop}
-  on:dragover={onDragOver}
->
-  <p class="mb-2">Drag & Drop photos here</p>
-  <p class="text-sm mb-4">or</p>
-  <label class="inline-block bg-blue-600 text-white px-3 py-2 rounded cursor-pointer">
-    Choose Files
-    <input type="file" accept="image/*" multiple class="hidden" on:change={pickFiles} />
-  </label>
+<style>
+  .drop { border:2px dashed #94a3b8; border-radius:10px; padding:20px; text-align:center; transition:all .15s; }
+  .drop.drag { background:#f1f5f9; border-color:#3b82f6; }
+  .list { margin-top:12px; }
+  .row { display:flex; align-items:center; justify-content:space-between; padding:6px 8px; border:1px solid #e5e7eb; border-radius:8px; margin-bottom:8px; }
+  .bar { height:6px; background:#e5e7eb; border-radius:4px; overflow:hidden; margin-top:4px; }
+  .bar > div { height:100%; background:#3b82f6; width:0%; transition:width .2s; }
+  small.muted { color:#6b7280; }
+</style>
+
+<div class="drop {isDragging ? 'drag' : ''}"
+     on:dragover={onDragOver}
+     on:dragleave={onDragLeave}
+     on:drop={onDrop}>
+  <div><strong>Drag & Drop</strong> photos here</div>
+  <div class="mt-1"><small class="muted">or</small></div>
+  <div class="mt-2">
+    <input type="file" multiple accept="image/*" on:change={onPick} />
+  </div>
 </div>
 
 {#if uploads.length}
-  <div class="mt-4 space-y-2">
+  <div class="list">
     {#each uploads as u}
-      <div class="text-sm">
-        <div class="flex justify-between">
-          <span>{u.name}</span>
-          <span>{u.progress}%</span>
+      <div class="row">
+        <div>
+          <div><strong>{u.name}</strong></div>
+          <div class="bar"><div style="width:{u.progress}%"></div></div>
+          <small class="muted">
+            {u.status === 'uploading' ? 'Uploading…' :
+             u.status === 'done' ? 'Uploaded ✓' :
+             u.status === 'too-big' ? 'Skipped (too large)' :
+             u.status === 'failed' ? 'Failed' : 'Pending'}
+          </small>
         </div>
-        <div class="h-2 bg-gray-200 rounded">
-          <div class="h-2 rounded bg-green-600" style="width: {u.progress}%;"></div>
-        </div>
-        {#if u.state === 'success'}
-          <span class="text-green-700">Uploaded</span>
-        {:else if u.state === 'error'}
-          <span class="text-red-700">Error</span>
-        {/if}
+        <div>{u.progress}%</div>
       </div>
     {/each}
   </div>
