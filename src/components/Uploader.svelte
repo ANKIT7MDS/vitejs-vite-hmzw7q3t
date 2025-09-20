@@ -1,105 +1,114 @@
 <script>
   import { getAuth } from "firebase/auth";
-  import { uploadFile } from "../lib/uploader";
 
   export let selectedCollectionId = "";
   export let selectedEventId = "";
 
-  let queue = [];
-  let results = [];
-  let busy = false;
-  let doneCount = 0;
+  // ✅ अपना Cloud Run upload API (जो curl से सफल हुआ था) यहाँ डालें:
+  const UPLOAD_API = "https://uploadimage-tmo2okwfxa-el.a.run.app"; // <-- अपना URL
 
-  function getUid() {
-    const u = getAuth().currentUser;
-    return u?.uid || u?.phoneNumber || "demo";
+  let files = [];
+  let status = "";
+  let working = false;
+
+  const auth = getAuth();
+
+  function onChoose(e) {
+    files = Array.from(e.target.files || []);
   }
 
-  function onPickFiles(e) {
-    const files = Array.from(e.target.files || []);
-    queue = [...queue, ...files];
+  function readAsDataURL(file) {
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = rej;
+      fr.readAsDataURL(file);
+    });
   }
 
-  function onDrop(e) {
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files || []);
-    queue = [...queue, ...files];
-  }
-  function onDragOver(e) {
-    e.preventDefault();
-  }
-
-  async function startUpload() {
+  async function uploadAll() {
+    if (!auth.currentUser) {
+      alert("कृपया लॉग-इन करें");
+      return;
+    }
     if (!selectedCollectionId || !selectedEventId) {
       alert("पहले Collection और Event चुनें");
       return;
     }
-    if (queue.length === 0) {
-      alert("फाइल चुनें या ड्रैग-ड्रॉप करें");
+    if (!files.length) {
+      alert("फोटो चुनें");
       return;
     }
 
-    busy = true;
-    doneCount = 0;
-    results = [];
+    working = true;
+    status = "Uploading...";
 
-    const uid = getUid();
-
-    for (const file of queue) {
-      try {
-        const out = await uploadFile({
-          file,
-          uid,
+    try {
+      for (const f of files) {
+        const dataUrl = await readAsDataURL(f);
+        const body = {
+          uid: auth.currentUser.uid,
           collectionId: selectedCollectionId,
-          eventId: selectedEventId
-        });
-        results = [{ name: file.name, ok: true, ...out }, ...results];
-      } catch (err) {
-        results = [{ name: file.name, ok: false, error: String(err) }, ...results];
-      }
-      doneCount++;
-    }
+          eventId: selectedEventId,
+          filename: f.name,
+          contentType: f.type || "image/jpeg",
+          dataUrl
+        };
 
-    queue = [];
-    busy = false;
+        const r = await fetch(UPLOAD_API, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            // Cloud Run में हमने CORS: '*' रखा है; auth header की जरूरत नहीं
+          },
+          body: JSON.stringify(body)
+        });
+
+        if (!r.ok) {
+          const text = await r.text();
+          throw new Error(`Upload failed (${r.status}): ${text}`);
+        }
+
+        const json = await r.json(); // {ok:true, path, downloadURL}
+        // चाहें तो status में path/url दिखा सकते हैं
+      }
+
+      status = "All files uploaded ✅";
+      files = [];
+    } catch (e) {
+      console.error(e);
+      status = "Upload error: " + e.message;
+    } finally {
+      working = false;
+    }
   }
 </script>
 
 <style>
-  .drop { border: 2px dashed #888; padding: 22px; text-align: center; border-radius: 10px; }
-  .muted { color:#666; font-size: 13px; }
-  .ok { color: #0a7a2f; }
-  .err { color: #b00020; }
-  .grid { display:grid; gap:6px; }
+  .box {
+    border: 2px dashed #cfcfcf;
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+  .row { display:flex; gap:12px; align-items:center; }
+  button { padding:8px 12px; border:1px solid #ddd; background:#111; color:#fff; border-radius:8px; cursor:pointer; }
+  button:disabled{opacity:.6; cursor:not-allowed;}
+  .muted { color:#666; font-size:13px; }
 </style>
 
-<div class="grid">
-  <div class="muted">Drag & Drop photos here</div>
-  <div class="drop" on:drop={onDrop} on:dragover={onDragOver}>
-    <input type="file" multiple on:change={onPickFiles} />
-    <div class="muted">या ऊपर से फाइलें चुनें</div>
+<div class="box">
+  <div class="row" style="justify-content:center; margin-bottom:10px;">
+    <input type="file" multiple accept="image/*" on:change={onChoose} />
+    <button on:click={uploadAll} disabled={working || !files.length || !selectedCollectionId || !selectedEventId}>
+      {working ? "Uploading..." : "Upload"}
+    </button>
   </div>
 
-  {#if queue.length}
-    <div class="muted">{queue.length} files selected</div>
-  {/if}
-
-  <button disabled={busy} on:click={startUpload}>
-    {busy ? `Uploading ${doneCount}/${queue.length}` : "Start Upload"}
-  </button>
-
-  {#if results.length}
-    <h4>Results</h4>
-    {#each results as r}
-      <div class={r.ok ? "ok" : "err"}>
-        <strong>{r.name}</strong>
-        {#if r.ok}
-          <div>Path: {r.path}</div>
-          <div><a href={r.downloadURL} target="_blank" rel="noopener">Open</a></div>
-        {:else}
-          <div>{r.error}</div>
-        {/if}
-      </div>
-    {/each}
+  <div class="muted">
+    चुनी गई फाइलें: {files.length}
+  </div>
+  {#if status}
+    <div class="muted" style="margin-top:8px;">{status}</div>
   {/if}
 </div>
